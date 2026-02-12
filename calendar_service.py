@@ -69,13 +69,25 @@ class CalendarService:
 
         return build("calendar", "v3", credentials=creds)
 
-    def create_event(self, title: str, start_dt: dt.datetime, duration_minutes: int) -> str:
-        end_dt = start_dt + dt.timedelta(minutes=duration_minutes)
+    def create_event(
+        self,
+        title: str,
+        start_dt: dt.datetime,
+        duration_minutes: int,
+        end_dt: Optional[dt.datetime] = None,
+        description: str = "",
+    ) -> str:
+        if end_dt is None:
+            end_dt = start_dt + dt.timedelta(minutes=duration_minutes)
+
         body = {
             "summary": title,
             "start": {"dateTime": start_dt.isoformat()},
             "end": {"dateTime": end_dt.isoformat()},
         }
+
+        if description:
+            body["description"] = description
 
         service = self.get_service()
         try:

@@ -35,6 +35,18 @@ def _normalize_text(text: str) -> str:
     return t
 
 
+def _extract_time_range(text: str) -> tuple[str | None, str | None]:
+    t = text
+    m = re.search(
+        r"\b(?:в\s*)?(\d{1,2}:\d{2})\s*(?:до|\-|–|—|to)\s*(\d{1,2}:\d{2})\b",
+        t,
+        flags=re.IGNORECASE,
+    )
+    if not m:
+        return None, None
+    return m.group(1), m.group(2)
+
+
 def _parse_start_datetime_fallback(text: str, tz: str) -> dt.datetime | None:
     settings = {
         "PREFER_DATES_FROM": "future",
@@ -83,10 +95,12 @@ def _extract_explicit_fields(text: str) -> dict:
         "title": re.compile(r"^(?:титул|заголовок|title)\s*(?:это)?\s*[-—:=]+\s*(.+)$", re.IGNORECASE),
         "date": re.compile(r"^(?:дата|date)\s*[-—:=]+\s*(.+)$", re.IGNORECASE),
         "time": re.compile(r"^(?:время|time)\s*[-—:=]+\s*(.+)$", re.IGNORECASE),
+        "end": re.compile(r"^(?:конец|окончание|end)\s*[-—:=]+\s*(.+)$", re.IGNORECASE),
         "duration": re.compile(
             r"^(?:протяженность|длительность|duration)\s*(?:\(.*\))?\s*[-—:=]+\s*(.+)$",
             re.IGNORECASE,
         ),
+        "notes": re.compile(r"^(?:заметки|описание|документы|notes)\s*[-—:=]+\s*(.+)$", re.IGNORECASE),
     }
 
     out: dict = {}
@@ -102,7 +116,9 @@ def _extract_explicit_fields(text: str) -> dict:
     title = (out.get("title") or "").strip()
     date_s = (out.get("date") or "").strip()
     time_s = (out.get("time") or "").strip()
+    end_s = (out.get("end") or "").strip()
     duration_raw = (out.get("duration") or "").strip()
+    notes = (out.get("notes") or "").strip()
 
     duration_minutes = None
     if duration_raw:
@@ -120,10 +136,16 @@ def _extract_explicit_fields(text: str) -> dict:
     elif date_s:
         start_datetime = date_s
 
+    end_datetime = ""
+    if date_s and end_s:
+        end_datetime = f"{date_s} {end_s}"
+
     res = {
         "title": title,
         "start_datetime": start_datetime,
+        "end_datetime": end_datetime,
         "duration_minutes": duration_minutes or 60,
+        "notes": notes,
     }
     if not res["title"] and not res["start_datetime"]:
         return {}
@@ -164,16 +186,19 @@ def _openai_extract_event_json(text: str, cfg: Config) -> dict:
     prompt = (
         "Ты помощник-секретарь. Извлеки из сообщения данные встречи. "
         "Верни только валидный JSON строго по схеме: "
-        '{"title":"","start_datetime":"","duration_minutes":60}. '\
+        '{"title":"","start_datetime":"","end_datetime":"","duration_minutes":60,"notes":""}. '\
         "Правила: title — короткий заголовок без лишних слов вроде 'запиши меня', максимум 3-6 слов. "
         "Если речь про стоматолога/зубного — title сделай 'Зубной врач'. "
-        "start_datetime верни в ISO 8601 с часовым поясом. "
+        "start_datetime и end_datetime верни в ISO 8601 с часовым поясом. "
+        "Если в тексте указан диапазон времени (например 'с 8:00 до 14:00'), заполни end_datetime. "
         f"Текущая дата/время пользователя: {now.isoformat()}. "
         "Если длительность не указана, ставь 60. "
         "Если дату/время нельзя определить, оставь start_datetime пустым. "
+        "notes: если есть что принести/подготовить/документы — коротко перечисли. "
         "Примеры: "
-        "\nВвод: 'запиши меня к зубному на завтра в 12:00' -> {\"title\":\"Зубной врач\",\"start_datetime\":\"<завтра 12:00 в ISO>\",\"duration_minutes\":60}"
-        "\nВвод: 'созвон с Петром в пятницу в 15:30 на 45 минут' -> {\"title\":\"Созвон с Петром\",\"start_datetime\":\"...\",\"duration_minutes\":45}"
+        "\nВвод: 'запиши меня к зубному на завтра в 12:00' -> {\"title\":\"Зубной врач\",\"start_datetime\":\"<завтра 12:00 в ISO>\",\"end_datetime\":\"\",\"duration_minutes\":60,\"notes\":\"\"}"
+        "\nВвод: 'завтра с 8:00 до 14:00 привезти паспорт' -> {\"title\":\"Встреча\",\"start_datetime\":\"<завтра 8:00 в ISO>\",\"end_datetime\":\"<завтра 14:00 в ISO>\",\"duration_minutes\":60,\"notes\":\"паспорт\"}"
+        "\nВвод: 'созвон с Петром в пятницу в 15:30 на 45 минут' -> {\"title\":\"Созвон с Петром\",\"start_datetime\":\"...\",\"end_datetime\":\"\",\"duration_minutes\":45,\"notes\":\"\"}"
     )
 
     kwargs = {
@@ -217,7 +242,11 @@ async def _handle_text_common(update: Update, context: ContextTypes.DEFAULT_TYPE
         title = (explicit.get("title") or "").strip() or _fallback_title(normalized)
         duration = int(explicit.get("duration_minutes") or 60)
         start_raw = (explicit.get("start_datetime") or "").strip()
+        end_raw = (explicit.get("end_datetime") or "").strip()
+        notes = (explicit.get("notes") or "").strip()
+
         start_dt = _parse_start_datetime_fallback(_normalize_text(start_raw), cfg.tz) if start_raw else None
+        end_dt = _parse_start_datetime_fallback(_normalize_text(end_raw), cfg.tz) if end_raw else None
         if not start_dt:
             await update.message.reply_text(
                 "Не смог распознать дату/время из полей. Уточните (пример: 'дата - 13.02.2026' и 'время - 12:00')."
@@ -228,12 +257,23 @@ async def _handle_text_common(update: Update, context: ContextTypes.DEFAULT_TYPE
             start_dt = start_dt.replace(tzinfo=ZoneInfo(cfg.tz))
 
         try:
-            link = cal.create_event(title=title, start_dt=start_dt, duration_minutes=duration)
+            link = cal.create_event(
+                title=title,
+                start_dt=start_dt,
+                duration_minutes=duration,
+                end_dt=end_dt,
+                description=notes,
+            )
         except CalendarServiceError as e:
             await update.message.reply_text(f"Ошибка Google Calendar: {e}")
             return
 
-        msg = f"Добавил: {title}\nНачало: {start_dt.isoformat()}\nДлительность: {duration} мин"
+        msg = f"Добавил: {title}\nНачало: {start_dt.isoformat()}"
+        if end_dt:
+            msg += f"\nКонец: {end_dt.isoformat()}"
+        msg += f"\nДлительность: {duration} мин"
+        if notes:
+            msg += f"\nЗаметки: {notes}"
         if link:
             msg += f"\nСсылка: {link}"
         await update.message.reply_text(msg)
@@ -244,11 +284,15 @@ async def _handle_text_common(update: Update, context: ContextTypes.DEFAULT_TYPE
     except Exception:
         data = {}
 
+    notes = (data.get("notes") or "").strip()
+
     title = (data.get("title") or "").strip() or _fallback_title(normalized)
     duration = int(data.get("duration_minutes") or _fallback_duration_minutes(normalized) or 60)
 
     start_str = (data.get("start_datetime") or "").strip()
+    end_str = (data.get("end_datetime") or "").strip()
     start_dt: dt.datetime | None = None
+    end_dt: dt.datetime | None = None
 
     if start_str:
         try:
@@ -256,8 +300,22 @@ async def _handle_text_common(update: Update, context: ContextTypes.DEFAULT_TYPE
         except Exception:
             start_dt = None
 
+    if end_str:
+        try:
+            end_dt = dt.datetime.fromisoformat(end_str)
+        except Exception:
+            end_dt = None
+
     if not start_dt:
-        start_dt = _parse_start_datetime_fallback(normalized, cfg.tz)
+        start_time, end_time = _extract_time_range(normalized)
+        if start_time and end_time:
+            base = _parse_start_datetime_fallback(normalized, cfg.tz)
+            if base:
+                start_dt = _parse_start_datetime_fallback(f"{base.date()} {start_time}", cfg.tz)
+                end_dt = _parse_start_datetime_fallback(f"{base.date()} {end_time}", cfg.tz)
+
+        if not start_dt:
+            start_dt = _parse_start_datetime_fallback(normalized, cfg.tz)
 
     if not start_dt:
         await update.message.reply_text(
@@ -268,13 +326,30 @@ async def _handle_text_common(update: Update, context: ContextTypes.DEFAULT_TYPE
     if start_dt.tzinfo is None:
         start_dt = start_dt.replace(tzinfo=ZoneInfo(cfg.tz))
 
+    if end_dt and end_dt.tzinfo is None:
+        end_dt = end_dt.replace(tzinfo=ZoneInfo(cfg.tz))
+
+    if end_dt and end_dt <= start_dt:
+        end_dt = None
+
     try:
-        link = cal.create_event(title=title, start_dt=start_dt, duration_minutes=duration)
+        link = cal.create_event(
+            title=title,
+            start_dt=start_dt,
+            duration_minutes=duration,
+            end_dt=end_dt,
+            description=notes,
+        )
     except CalendarServiceError as e:
         await update.message.reply_text(f"Ошибка Google Calendar: {e}")
         return
 
-    msg = f"Добавил: {title}\nНачало: {start_dt.isoformat()}\nДлительность: {duration} мин"
+    msg = f"Добавил: {title}\nНачало: {start_dt.isoformat()}"
+    if end_dt:
+        msg += f"\nКонец: {end_dt.isoformat()}"
+    msg += f"\nДлительность: {duration} мин"
+    if notes:
+        msg += f"\nЗаметки: {notes}"
     if link:
         msg += f"\nСсылка: {link}"
 
