@@ -28,8 +28,79 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     )
 
 
+_RU_NUM_WORDS: dict[str, int] = {
+    "ноль": 0,
+    "один": 1,
+    "одна": 1,
+    "одно": 1,
+    "два": 2,
+    "две": 2,
+    "три": 3,
+    "четыре": 4,
+    "пять": 5,
+    "шесть": 6,
+    "семь": 7,
+    "восемь": 8,
+    "девять": 9,
+    "десять": 10,
+    "одиннадцать": 11,
+    "двенадцать": 12,
+}
+
+
+def _ru_hour_to_24h(hour: int, part_of_day: str | None) -> int:
+    part = (part_of_day or "").lower().strip()
+
+    if part in {"вечера", "дня"}:
+        if 1 <= hour <= 11:
+            return hour + 12
+        return hour
+
+    if part == "ночи":
+        if hour == 12:
+            return 0
+        return hour
+
+    return hour
+
+
+def _normalize_russian_word_time(text: str) -> str:
+    t = text
+
+    def repl(m: re.Match) -> str:
+        raw_hour = (m.group("hour") or "").strip().lower()
+        part = m.group("part")
+
+        if raw_hour.isdigit():
+            h = int(raw_hour)
+        else:
+            h = _RU_NUM_WORDS.get(raw_hour, -1)
+
+        if h < 0 or h > 23:
+            return m.group(0)
+
+        h = _ru_hour_to_24h(h, part)
+        return f"{h:02d}:00"
+
+    # Examples:
+    # - "в пять часов вечера"
+    # - "в 5 часов вечера"
+    # - "в пять вечера"
+    # - "в 5 вечера"
+    t = re.sub(
+        r"\bв\s+(?P<hour>\d{1,2}|один|одна|два|две|три|четыре|пять|шесть|семь|восемь|девять|десять|одиннадцать|двенадцать)"
+        r"(?:\s*час(?:а|ов)?)?\s*(?P<part>утра|дня|вечера|ночи)\b",
+        repl,
+        t,
+        flags=re.IGNORECASE,
+    )
+
+    return t
+
+
 def _normalize_text(text: str) -> str:
     t = text.strip()
+    t = _normalize_russian_word_time(t)
     t = re.sub(r"\b(\d{1,2})[-.](\d{2})\b", r"\1:\2", t)
     t = re.sub(r"\b(\d{1,2})\s*h\s*(\d{2})\b", r"\1:\2", t, flags=re.IGNORECASE)
     return t
@@ -45,6 +116,29 @@ def _extract_time_range(text: str) -> tuple[str | None, str | None]:
     if not m:
         return None, None
     return m.group(1), m.group(2)
+
+
+def _extract_first_time(text: str) -> str | None:
+    m = re.search(r"\b(\d{1,2}):(\d{2})\b", text)
+    if not m:
+        return None
+    hh = int(m.group(1))
+    mm = int(m.group(2))
+    if 0 <= hh <= 23 and 0 <= mm <= 59:
+        return f"{hh:02d}:{mm:02d}"
+    return None
+
+
+def _combine_date_and_time(base: dt.datetime, time_str: str, tz: str) -> dt.datetime | None:
+    try:
+        hh, mm = time_str.split(":")
+        h = int(hh)
+        m = int(mm)
+    except Exception:
+        return None
+
+    tzinfo = base.tzinfo or ZoneInfo(tz)
+    return dt.datetime(base.year, base.month, base.day, h, m, tzinfo=tzinfo)
 
 
 def _parse_start_datetime_fallback(text: str, tz: str) -> dt.datetime | None:
@@ -67,8 +161,22 @@ def _fallback_title(text: str) -> str:
     t = text.strip()
     lowered = t.lower()
 
+    t = re.sub(
+        r"^\s*(есть|будет|нужно|надо|хочу|у\s+меня|у\s+нас)\b\s*[:\-—]*\s*",
+        "",
+        t,
+        flags=re.IGNORECASE,
+    )
+    lowered = t.lower()
+
     if re.search(r"\b(к\s+зубному|к\s+стоматологу|стоматолог)\b", lowered):
         return "Зубной врач"
+
+    if re.search(r"\b(к\s+врачу|прием\s+у\s+врача|прие?м\s+у\s+врача|врач)\b", lowered):
+        return "Приём у врача"
+
+    if re.search(r"\b(налоговую|налоговая|налоговая\s+инспекция|ифнс)\b", lowered):
+        return "Налоговая"
 
     t = re.sub(
         r"^\s*(запиши(те)?\s+меня|запланируй|добавь|поставь|назначь)\b\s*",
@@ -84,6 +192,64 @@ def _fallback_title(text: str) -> str:
         return "Встреча"
 
     return t[:120].capitalize()
+
+
+def _extract_notes_fallback(text: str) -> str:
+    t = text.strip()
+    lowered = t.lower()
+    markers = [
+        "документы",
+        "документ",
+        "взять",
+        "принести",
+        "не забыть",
+        "очередь",
+    ]
+
+    idx = None
+    for m in markers:
+        pos = lowered.find(m)
+        if pos != -1:
+            idx = pos if idx is None else min(idx, pos)
+
+    if idx is None:
+        return ""
+
+    notes = t[idx:].strip(" -—:;,.\t\n")
+    return notes[:800]
+
+
+def _extract_title_fallback(text: str) -> str:
+    t = text.strip()
+    t = re.sub(
+        r"^\s*(есть|будет|нужно|надо|хочу|у\s+меня|у\s+нас)\b\s*[:\-—]*\s*",
+        "",
+        t,
+        flags=re.IGNORECASE,
+    )
+    lowered = t.lower()
+
+    if re.search(r"\b(налоговую|налоговая|налоговая\s+инспекция|ифнс)\b", lowered):
+        return "Налоговая"
+    if re.search(r"\b(к\s+зубному|к\s+стоматологу|стоматолог)\b", lowered):
+        return "Зубной врач"
+
+    cut_markers = ["документы", "документ", "очередь", "принести", "взять", "не забыть"]
+    cut_idx = None
+    for m in cut_markers:
+        pos = lowered.find(m)
+        if pos != -1:
+            cut_idx = pos if cut_idx is None else min(cut_idx, pos)
+
+    if cut_idx is not None:
+        t = t[:cut_idx]
+
+    t = re.sub(r"\s+\d{1,2}\s+[а-яA-Za-z]+\s+\d{2,4}.*$", "", t, flags=re.IGNORECASE)
+    t = re.sub(r"\s+\d{1,2}:\d{2}.*$", "", t, flags=re.IGNORECASE)
+    t = re.sub(r"\s+в\s+\d{1,2}:\d{2}.*$", "", t, flags=re.IGNORECASE)
+    t = t.strip(" -—:;,.\t\n")
+
+    return (t[:80].capitalize() if t else "Встреча")
 
 
 def _extract_explicit_fields(text: str) -> dict:
@@ -184,21 +350,51 @@ def _openai_extract_event_json(text: str, cfg: Config) -> dict:
 
     now = dt.datetime.now(ZoneInfo(cfg.tz))
     prompt = (
-        "Ты помощник-секретарь. Извлеки из сообщения данные встречи. "
-        "Верни только валидный JSON строго по схеме: "
-        '{"title":"","start_datetime":"","end_datetime":"","duration_minutes":60,"notes":""}. '\
-        "Правила: title — короткий заголовок без лишних слов вроде 'запиши меня', максимум 3-6 слов. "
-        "Если речь про стоматолога/зубного — title сделай 'Зубной врач'. "
-        "start_datetime и end_datetime верни в ISO 8601 с часовым поясом. "
-        "Если в тексте указан диапазон времени (например 'с 8:00 до 14:00'), заполни end_datetime. "
-        f"Текущая дата/время пользователя: {now.isoformat()}. "
-        "Если длительность не указана, ставь 60. "
-        "Если дату/время нельзя определить, оставь start_datetime пустым. "
-        "notes: если есть что принести/подготовить/документы — коротко перечисли. "
+        "Ты профессиональный секретарь-парсер событий. "
+        "Твоя задача — извлечь из сообщения данные события и вернуть ТОЛЬКО валидный JSON. "
+        "Никакого текста вне JSON. "
+
+        "Строгая схема ответа: "
+        '{"title":"","start_datetime":"","end_datetime":"","duration_minutes":60,"notes":""}. '
+
+        "Правила обработки: "
+
+        "1. title — короткая тема события (1-4 слова), без даты, времени и документов. "
+        "   Если есть цель (например 'на собеседование') — это и есть title. "
+        "   Если указано 'к врачу' — title = 'Врач'. "
+        "   Если указано 'к зубному' — title = 'Зубной врач'. "
+        "   Если указано 'в банк на собеседование' — title = 'Собеседование'. "
+
+        "2. start_datetime и end_datetime вернуть в ISO 8601 формате с часовым поясом +03:00. "
+        "   Формат: YYYY-MM-DDTHH:MM:SS+03:00 "
+
+        "3. Если указано 'сегодня' — используй сегодняшнюю дату. "
+        "   Если указано 'завтра' — прибавь 1 день к текущей дате. "
+
+        f"Текущая дата пользователя: {now.strftime('%Y-%m-%d')}. "
+        f"Текущее время пользователя: {now.strftime('%H:%M')}. "
+
+        "4. Если указан диапазон времени (например 'с 8:00 до 14:00'), "
+        "   заполни и start_datetime и end_datetime. "
+
+        "5. Если указано только одно время — заполни только start_datetime. "
+
+        "6. duration_minutes — "
+        "   если указана длительность ('на 45 минут') — используй её. "
+        "   иначе всегда 60. "
+
+        "7. notes — перечисли, что нужно взять или подготовить. "
+        "   Убери слова 'взять', 'принести', 'не забыть'. "
+        "   Перечисляй через '; '. "
+        "   Если ничего не указано — оставь пустую строку."
+
         "Примеры: "
-        "\nВвод: 'запиши меня к зубному на завтра в 12:00' -> {\"title\":\"Зубной врач\",\"start_datetime\":\"<завтра 12:00 в ISO>\",\"end_datetime\":\"\",\"duration_minutes\":60,\"notes\":\"\"}"
-        "\nВвод: 'завтра с 8:00 до 14:00 привезти паспорт' -> {\"title\":\"Встреча\",\"start_datetime\":\"<завтра 8:00 в ISO>\",\"end_datetime\":\"<завтра 14:00 в ISO>\",\"duration_minutes\":60,\"notes\":\"паспорт\"}"
-        "\nВвод: 'созвон с Петром в пятницу в 15:30 на 45 минут' -> {\"title\":\"Созвон с Петром\",\"start_datetime\":\"...\",\"end_datetime\":\"\",\"duration_minutes\":45,\"notes\":\"\"}"
+
+        "\nВвод: 'запиши меня к врачу сегодня на 19-00' "
+        "-> {\"title\":\"Врач\",\"start_datetime\":\"2026-02-12T19:00:00+03:00\",\"end_datetime\":\"\",\"duration_minutes\":60,\"notes\":\"\"}"
+
+        "\nВвод: 'сходить в банк завтра на собеседование в 10:30, взять диплом и паспорт' "
+    "-> {\"title\":\"Собеседование\",\"start_datetime\":\"2026-02-13T10:30:00+03:00\",\"end_datetime\":\"\",\"duration_minutes\":60,\"notes\":\"диплом; паспорт\"}"
     )
 
     kwargs = {
@@ -285,8 +481,14 @@ async def _handle_text_common(update: Update, context: ContextTypes.DEFAULT_TYPE
         data = {}
 
     notes = (data.get("notes") or "").strip()
+    if not notes:
+        notes = _extract_notes_fallback(normalized)
 
-    title = (data.get("title") or "").strip() or _fallback_title(normalized)
+    title = (data.get("title") or "").strip()
+    if not title or len(title) > 60 or re.search(r"\b(документ|документы|паспорт|очередь)\b", title, re.IGNORECASE):
+        title = _extract_title_fallback(normalized)
+    if not title:
+        title = _fallback_title(normalized)
     duration = int(data.get("duration_minutes") or _fallback_duration_minutes(normalized) or 60)
 
     start_str = (data.get("start_datetime") or "").strip()
@@ -317,11 +519,30 @@ async def _handle_text_common(update: Update, context: ContextTypes.DEFAULT_TYPE
         if not start_dt:
             start_dt = _parse_start_datetime_fallback(normalized, cfg.tz)
 
+    # If user explicitly provided a time, ensure we use it (dateparser may default to 'now' time).
+    if start_dt:
+        explicit_time = _extract_first_time(normalized)
+        if explicit_time:
+            now = dt.datetime.now(ZoneInfo(cfg.tz))
+            # Heuristic: if parsed time is close to 'now', we likely lost the intended time.
+            if abs((start_dt - now).total_seconds()) < 5 * 60:
+                combined = _combine_date_and_time(start_dt, explicit_time, cfg.tz)
+                if combined:
+                    start_dt = combined
+
     if not start_dt:
         await update.message.reply_text(
             "Не смог распознать дату/время. Уточните, пожалуйста (пример: 'в пятницу в 14:00')."
         )
         return
+
+    # If user explicitly provided a time, force it when parsed time differs.
+    if start_dt:
+        explicit_time = _extract_first_time(normalized)
+        if explicit_time:
+            combined = _combine_date_and_time(start_dt, explicit_time, cfg.tz)
+            if combined and (start_dt.hour != combined.hour or start_dt.minute != combined.minute):
+                start_dt = combined
 
     if start_dt.tzinfo is None:
         start_dt = start_dt.replace(tzinfo=ZoneInfo(cfg.tz))
