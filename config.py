@@ -25,6 +25,8 @@ class Config:
 
         self.whisper_provider = os.getenv("WHISPER_PROVIDER", "openai")
         self.openai_whisper_model = os.getenv("OPENAI_WHISPER_MODEL", "whisper-1")
+        self.local_whisper_model = os.getenv("LOCAL_WHISPER_MODEL", "base")
+        self.whisper_language = os.getenv("WHISPER_LANGUAGE", "ru")
 
         self.google_client_id = getenv_required("GOOGLE_CLIENT_ID")
         self.google_client_secret = getenv_required("GOOGLE_CLIENT_SECRET")

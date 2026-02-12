@@ -8,10 +8,21 @@ class SpeechServiceError(RuntimeError):
 
 
 class SpeechService:
-    def __init__(self, provider: str, openai_api_key: str, openai_model: str) -> None:
+    _local_model_cache = {}
+
+    def __init__(
+        self,
+        provider: str,
+        openai_api_key: str,
+        openai_model: str,
+        local_model: str = "base",
+        language: str = "ru",
+    ) -> None:
         self.provider = provider.lower().strip()
         self.openai_api_key = openai_api_key
         self.openai_model = openai_model
+        self.local_model = (local_model or "base").strip()
+        self.language = (language or "").strip() or None
 
     def transcribe(self, audio_path: str) -> str:
         if not os.path.exists(audio_path):
@@ -70,9 +81,16 @@ class SpeechService:
                 "Установите ffmpeg и перезапустите терминал/IDE."
             )
 
-        model = whisper.load_model("base")
+        model = self._local_model_cache.get(self.local_model)
+        if model is None:
+            model = whisper.load_model(self.local_model)
+            self._local_model_cache[self.local_model] = model
+
         try:
-            res = model.transcribe(audio_path)
+            kwargs = {}
+            if self.language:
+                kwargs["language"] = self.language
+            res = model.transcribe(audio_path, **kwargs)
         except FileNotFoundError as e:
             raise SpeechServiceError(
                 "Local Whisper transcription failed: не найден исполняемый файл. "

@@ -632,6 +632,8 @@ def main() -> None:
         provider=cfg.whisper_provider,
         openai_api_key=cfg.openai_api_key,
         openai_model=cfg.openai_whisper_model,
+        local_model=cfg.local_whisper_model,
+        language=cfg.whisper_language,
     )
     app.bot_data["calendar"] = CalendarService(
         client_id=cfg.google_client_id,
