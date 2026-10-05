@@ -1,134 +1,30 @@
-# CalendarBot
+# CalendarBot: a Telegram secretary for Google Calendar
 
-Telegram-бот (Python) — личный секретарь: принимает текст или голос, извлекает данные встречи и добавляет событие в Google Calendar.
+A Python Telegram bot that turns a text or voice message into a Google Calendar event. Voice notes are transcribed with Whisper (through the OpenAI API, or a local Whisper model), then an OpenAI model extracts the title, start, end or duration and notes as JSON. If the model is unavailable or returns something unusable, a rule-based fallback takes over: `dateparser` plus regular expressions for Russian time expressions ("в пять вечера", "в 5 часов вечера", ranges like "12:00 до 14:00"), duration phrases and title clean-up. A strict multi-line format (title / date / time / end or duration / notes, one field per line) bypasses the AI entirely. The bot replies with the created event and a link to it. Built for Russian-language input.
 
-## Возможности
+**Stack:** Python 3.10+ · python-telegram-bot 21 (async) · OpenAI API (chat model for extraction, `whisper-1` for speech) or local `openai-whisper` · Google Calendar API with OAuth 2.0 (installed-app flow, token cached in `token.json`) · dateparser · python-dotenv.
 
-- Текстовые сообщения -> создание события в Google Calendar
-- Голосовые сообщения (audio/voice) -> распознавание речи -> создание события
-- Извлечение структуры встречи (title / date+time / duration)
-- OAuth авторизация Google Calendar:
-  - первый раз создаётся `token.json`
-  - далее используется сохранённый `token.json`
+**Files:** `bot.py` (handlers and parsing pipeline) · `speech_service.py` (OpenAI or local Whisper) · `calendar_service.py` (OAuth and event creation) · `config.py` (settings from `.env`, fails fast on missing required values).
 
-## Требования
+## Run locally
 
-- Windows/macOS/Linux
-- Python 3.10+ (проект тестировался на Windows)
-- Аккаунт Telegram (BotFather токен)
-- Google Cloud Project с включенным Google Calendar API
-- OpenAI API key (используется для извлечения структуры встречи из текста)
-
-## Установка
-
-```powershell
+```bash
 python -m venv .venv
-.\.venv\Scripts\activate
-python -m pip install -r requirements.txt
+source .venv/bin/activate          # Windows: .venv\Scripts\activate
+pip install -r requirements.txt
+cp .env.example .env               # Windows: copy .env.example .env
+python bot.py
 ```
 
-## Настройка окружения (.env)
+On the first event the bot opens the Google OAuth consent flow in a browser and stores the resulting token in `token.json` (git-ignored).
 
-1. Скопируйте пример:
+**Required in `.env`:** `TELEGRAM_TOKEN` (from BotFather), `OPENAI_API_KEY`, `GOOGLE_CLIENT_ID`, `GOOGLE_CLIENT_SECRET` (an OAuth client of type *Desktop app* with the Google Calendar API enabled).
+**Optional:** `OPENAI_MODEL`, `WHISPER_PROVIDER` (`openai` or `local`), `OPENAI_WHISPER_MODEL`, `LOCAL_WHISPER_MODEL`, `WHISPER_LANGUAGE`, `GOOGLE_CALENDAR_ID`, `GOOGLE_PROJECT_ID`, `GOOGLE_REDIRECT_URI`, `GOOGLE_OAUTH_CLIENT_TYPE`, `GOOGLE_OAUTH_LOCAL_SERVER_PORT`, `TZ`.
 
-```powershell
-copy .env.example .env
-```
+For `WHISPER_PROVIDER=local`, also install `openai-whisper` and make sure `ffmpeg` is on your `PATH`. If Google returns `403 access_denied`, add your account as a test user on the OAuth consent screen.
 
-2. Заполните `.env` значениями:
+**Example messages:** "запиши меня к зубному на завтра в 12:00" · "созвон с Петром в пятницу в 15:30 на 45 минут".
 
-- `TELEGRAM_TOKEN` — токен вашего бота
-- `OPENAI_API_KEY` — ключ OpenAI
-- `GOOGLE_CLIENT_ID` / `GOOGLE_CLIENT_SECRET` — OAuth Client (Desktop)
-- `GOOGLE_CALENDAR_ID` — календарь (`primary` по умолчанию)
-- `TZ` — часовой пояс, например `Europe/Kyiv`
+## Author
 
-### Важно про секреты
-
-- Все ключи/секреты хранятся **только** в `.env`
-- `token.json` не коммитится (в `.gitignore`)
-
-## Google Cloud настройка
-
-1. Включите API:
-   - Google Cloud Console -> APIs & Services -> Library -> **Google Calendar API** -> Enable
-2. OAuth consent screen:
-   - Если Publishing status = **Testing**, добавьте свой email в **Test users**
-3. Credentials:
-   - Создайте OAuth Client ID типа **Desktop app**
-   - Скопируйте `client_id` и `client_secret` в `.env`
-
-## Запуск
-
-```powershell
-.\.venv\Scripts\python.exe bot.py
-```
-
-При первой попытке создать событие откроется OAuth-авторизация. После подтверждения будет создан `token.json`.
-
-## Использование
-
-### Обычный текст
-
-Примеры сообщений:
-
-- `запиши меня к зубному на завтра в 12:00`
-- `созвон с Петром в пятницу в 15:30 на 45 минут`
-
-Бот старается:
-
-- корректно распознать дату/время
-- если длительность не указана — ставит 60 минут
-- улучшать заголовок (например, про стоматолога -> `Зубной врач`)
-
-### Явный формат (точное задание полей)
-
-Можно отправить в нескольких строках:
-
-```text
-титул это - Зубной врач
-дата - 13.02.26
-время - 12-00
-протяженность - 1 час
-```
-
-### Голосовые сообщения
-
-Голосовые сообщения распознаются и далее обрабатываются как обычный текст.
-
-Выбор провайдера задаётся в `.env`:
-
-- `WHISPER_PROVIDER=openai` — распознавание через OpenAI (нужна оплаченная квота)
-- `WHISPER_PROVIDER=local` — локальный Whisper
-
-#### Локальный Whisper и ffmpeg (Windows)
-
-Для `WHISPER_PROVIDER=local` требуется установленный `ffmpeg` в `PATH`.
-
-Проверка:
-
-```powershell
-ffmpeg -version
-```
-
-## Файлы проекта
-
-- `bot.py` — Telegram bot (text + voice)
-- `speech_service.py` — распознавание речи (OpenAI или local Whisper)
-- `calendar_service.py` — Google Calendar API + OAuth (`token.json`)
-- `config.py` — загрузка конфигурации из `.env`
-
-## Troubleshooting
-
-- **Бот не отвечает**
-  - проверьте, что процесс `bot.py` запущен
-  - проверьте `TELEGRAM_TOKEN`
-- **Google OAuth 403 access_denied**
-  - проверьте OAuth consent screen (Testing -> Test users)
-  - убедитесь, что клиент типа Desktop
-- **Local Whisper WinError 2**
-  - обычно нет `ffmpeg` в `PATH`
-
-## Лицензия
-
-Добавьте лицензию при необходимости.
+Evgeny Nemchenko, full-stack developer: [bluecat.cc](https://bluecat.cc) · [LinkedIn](https://www.linkedin.com/in/evgeny-nemchenko) · [nevgeny90@gmail.com](mailto:nevgeny90@gmail.com) · [GitHub @Jony251](https://github.com/Jony251)
